@@ -35,8 +35,8 @@ import (
 // FooReconciler reconciles a Foo object
 type FooReconciler struct {
 	client.Client
-	Scheme            *runtime.Scheme
-	JunoManagerClient *juno_manager_client.JunoManagerClient
+	Scheme *runtime.Scheme
+	*juno_manager_client.JunoManagerClient
 }
 
 //+kubebuilder:rbac:groups=tutorial.my.domain,resources=foos,verbs=get;list;watch;create;update;patch;delete
@@ -87,19 +87,19 @@ func (r *FooReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 	reqID := foo.Status.RequestID
 
-	if response, ok := r.JunoManagerClient.StatusMap.Load(reqID); !ok {
-		// Check if the statusMap has any updates for this reqID.
+	response, completed, err := r.GetResponseUpdate(reqID)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !done {
+		// There has been no response for this request ID.
 		// Subscribe for notifications for this request ID.
 		log.Info("Subscribing for create snapshot updates", "requestID", reqID)
 		juno_manager_client.Subscribe(ctx, r.JunoManagerClient, reqID)
 		// Requeue the request after a wait to see if there's any update.
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 
-	} else if responseMsg, ok := response.(*pb.NotifyProgressResponseMsg); !ok {
-		log.Error(fmt.Errorf("unexpected value type received in r.JunoManagerClient.StatusMap"), "", "response", JsonObjectToString(response))
-		return ctrl.Result{}, fmt.Errorf("unable to process received response while checking status for create snapshot")
-
-	} else if responseMsg.GetTaskProgress() == pb.NotifyProgressResponseMsg_COMPLETED {
+	} else if response.GetTaskProgress() == pb.NotifyProgressResponseMsg_COMPLETED {
 		// If the request has been marked complete, unsubscribe for further
 		// updates and remove the requestID from the global statusMap.
 		// Update any relevant information provided by the server in the status.
@@ -117,9 +117,15 @@ func (r *FooReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{}, nil
 
 	} else {
+		go func() {
+			// Wait until there's a status update from the server.
+			r.WaitForResponseUpdate(reqID)
+			// TODO: Figure out: trigger an event.
+			// return ctrl.Result{RequeueRequest: true}, nil
+		}()
 		// Check the status back after a certain interval.
 		log.V(1).Info("Waiting for server to send updates for snapshot creation", "task progress", responseMsg.GetTaskProgress())
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		return ctrl.Result{}, nil
 	}
 }
 
