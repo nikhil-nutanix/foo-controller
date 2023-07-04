@@ -109,9 +109,9 @@ func main() {
 	}
 
 	if err = (&controllers.FooReconciler{
-		Client:            mgr.GetClient(),
-		Scheme:            mgr.GetScheme(),
-		JunoManagerClient: junoManagerClient,
+		Client:         mgr.GetClient(),
+		Scheme:         mgr.GetScheme(),
+		JunoManagerIfc: junoManagerClient,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Foo")
 		os.Exit(1)

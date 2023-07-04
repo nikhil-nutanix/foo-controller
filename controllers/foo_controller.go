@@ -28,7 +28,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	pb "github.com/maniknutanix/k8-grpc/juno_manager"
 	"github.com/maniknutanix/k8-grpc/juno_manager_client"
 )
 
@@ -36,7 +35,7 @@ import (
 type FooReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
-	*juno_manager_client.JunoManagerClient
+	juno_manager_client.JunoManagerIfc
 }
 
 //+kubebuilder:rbac:groups=tutorial.my.domain,resources=foos,verbs=get;list;watch;create;update;patch;delete
@@ -73,7 +72,7 @@ func (r *FooReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	if foo.Status.RequestID == "" {
 		// If requestID is not present in status, this is a new request to create snapshot.
 		log.V(1).Info("new request received creating snapshot")
-		requestID, err = juno_manager_client.CreateSnapshot(ctx, r.JunoManagerClient, fmt.Sprintf("TestRequest-0"))
+		requestID, err = r.CreateSnapshot(ctx, fmt.Sprintf("TestRequest-0"))
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -87,19 +86,19 @@ func (r *FooReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 	reqID := foo.Status.RequestID
 
-	response, completed, err := r.GetResponseUpdate(reqID)
+	response, requestExists, err := r.GetResponse(reqID)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if !done {
-		// There has been no response for this request ID.
+
+	if !requestExists {
 		// Subscribe for notifications for this request ID.
 		log.Info("Subscribing for create snapshot updates", "requestID", reqID)
-		juno_manager_client.Subscribe(ctx, r.JunoManagerClient, reqID)
+		r.Subscribe(ctx, reqID)
 		// Requeue the request after a wait to see if there's any update.
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 
-	} else if response.GetTaskProgress() == pb.NotifyProgressResponseMsg_COMPLETED {
+	} else if r.HasRequestCompleted(response) {
 		// If the request has been marked complete, unsubscribe for further
 		// updates and remove the requestID from the global statusMap.
 		// Update any relevant information provided by the server in the status.
@@ -111,21 +110,15 @@ func (r *FooReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			return ctrl.Result{}, err
 		}
 
-		juno_manager_client.Unsubscribe(ctx, r.JunoManagerClient, reqID)
+		r.Unsubscribe(ctx, reqID)
 
 		log.Info("foo custom resource reconciled")
 		return ctrl.Result{}, nil
 
 	} else {
-		go func() {
-			// Wait until there's a status update from the server.
-			r.WaitForResponseUpdate(reqID)
-			// TODO: Figure out: trigger an event.
-			// return ctrl.Result{RequeueRequest: true}, nil
-		}()
 		// Check the status back after a certain interval.
-		log.V(1).Info("Waiting for server to send updates for snapshot creation", "task progress", responseMsg.GetTaskProgress())
-		return ctrl.Result{}, nil
+		log.V(1).Info("Waiting for server to send updates for snapshot creation", "task progress", response.GetTaskProgress())
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 }
 
