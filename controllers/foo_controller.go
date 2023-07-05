@@ -86,7 +86,7 @@ func (r *FooReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 	reqID := foo.Status.RequestID
 
-	response, requestExists, err := r.GetResponse(reqID)
+	_, requestExists, err := r.GetResponse(reqID)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -94,11 +94,31 @@ func (r *FooReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	if !requestExists {
 		// Subscribe for notifications for this request ID.
 		log.Info("Subscribing for create snapshot updates", "requestID", reqID)
-		r.Subscribe(ctx, reqID)
+		cbStruct := &juno_manager_client.CbStruct{
+			CbFunc:    r.NotifyCallback,
+			Ctx:       ctx,
+			Req:       req,
+			RequestID: reqID,
+		}
+		r.Subscribe(ctx, reqID, cbStruct)
 		// Requeue the request after a wait to see if there's any update.
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
 
-	} else if r.HasRequestCompleted(response) {
+	log.Info("Nothing to do. Waiting for notifications from server")
+	return ctrl.Result{}, nil
+}
+
+func (r *FooReconciler) NotifyCallback(ctx context.Context, req ctrl.Request, requestID string, response *juno_manager_client.NotifyProgressResponse) {
+	log := log.FromContext(ctx)
+	// Get the live Foo resource that triggered the reconciliation request
+	var foo tutorialv1.Foo
+	if err := r.Get(ctx, req.NamespacedName, &foo); err != nil {
+		log.Error(err, "unable to fetch Foo")
+		return
+	}
+
+	if r.HasRequestCompleted(response) {
 		// If the request has been marked complete, unsubscribe for further
 		// updates and remove the requestID from the global statusMap.
 		// Update any relevant information provided by the server in the status.
@@ -107,19 +127,16 @@ func (r *FooReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		// foo.Status.RptIDs = r.JunoManagerClient.StatusMap[reqID].RptIDs
 		if err := r.Status().Update(ctx, &foo); err != nil {
 			log.Error(err, "unable to update foo's ready status", "requestID", requestID)
-			return ctrl.Result{}, err
+			return
 		}
 
-		r.Unsubscribe(ctx, reqID)
+		r.Unsubscribe(ctx, requestID)
 
 		log.Info("foo custom resource reconciled")
-		return ctrl.Result{}, nil
-
-	} else {
-		// Check the status back after a certain interval.
-		log.V(1).Info("Waiting for server to send updates for snapshot creation", "task progress", response.GetTaskProgress())
-		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		return
 	}
+
+	log.Info("The request with request ID hasn't completed yet. Will wake up at next notification from server", "requestID", requestID)
 }
 
 func JsonObjectToString(obj interface{}) string {
