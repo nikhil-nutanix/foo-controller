@@ -19,8 +19,6 @@ package controllers
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	tutorialv1 "my.domain/tutorial/api/v1"
@@ -29,6 +27,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/maniknutanix/k8-grpc/juno_manager_client"
+)
+
+// TODO: Move to a shared package..
+
+var (
+	OperationStatus_COMPLETED           = "COMPLETED"
+	OperationStatus_IN_PROGRESS         = "IN_PROGRESS"
+	OperationStatus_CREATE_REQUEST_SENT = "CREATE_REQUEST_SENT"
+	OperationStatus_INIT                = "" // Default value for a new custom resource.
 )
 
 // FooReconciler reconciles a Foo object
@@ -62,47 +69,44 @@ func (r *FooReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	if foo.Status.Ready {
+	if foo.Status.OperationStatus == OperationStatus_COMPLETED {
 		// Nothing to do.
 		return ctrl.Result{}, nil
 	}
 
-	var requestID string
-	var err error
-	if foo.Status.RequestID == "" {
+	var updateStatusBeforeReturn bool
+	requestID := string(foo.ObjectMeta.UID)
+	if foo.Status.OperationStatus == OperationStatus_INIT {
 		// If requestID is not present in status, this is a new request to create snapshot.
-		log.V(1).Info("new request received creating snapshot")
-		requestID, err = r.CreateSnapshot(ctx, fmt.Sprintf("TestRequest-0"))
+		log.V(1).Info("new request received for creating snapshot")
+		_, err := r.CreateSnapshot(ctx, requestID)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		foo.Status.RequestID = requestID
-		if err := r.Status().Update(ctx, &foo); err != nil {
-			log.Error(err, "unable to update foo's requestID status", "requestID", requestID)
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
+
+		// Update operation status to indicate that the create request has been sent.
+		foo.Status.OperationStatus = OperationStatus_CREATE_REQUEST_SENT
+		updateStatusBeforeReturn = true
 	}
 
-	reqID := foo.Status.RequestID
-
-	_, requestExists, err := r.GetResponse(reqID)
+	_, createRequestSent, err := r.GetResponse(requestID)
 	if err != nil {
+		if updateStatusBeforeReturn {
+			if err := r.Status().Update(ctx, &foo); err != nil {
+				log.Error(err, "unable to update foo's requestID status", "requestID", requestID)
+				return ctrl.Result{}, err
+			}
+		}
 		return ctrl.Result{}, err
 	}
 
-	if !requestExists {
+	if !createRequestSent {
 		// Subscribe for notifications for this request ID.
-		log.Info("Subscribing for create snapshot updates", "requestID", reqID)
-		cbStruct := &juno_manager_client.CbStruct{
-			CbFunc:    r.NotifyCallback,
-			Ctx:       ctx,
-			Req:       req,
-			RequestID: reqID,
-		}
-		r.Subscribe(ctx, reqID, cbStruct)
-		// Requeue the request after a wait to see if there's any update.
-		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		log.Info("Subscribing for create snapshot updates", "requestID", requestID)
+		callbackObj := juno_manager_client.NewCallbackObject(r.NotifyCallback, ctx, req, requestID)
+		r.Subscribe(ctx, requestID, callbackObj)
+		// We're done. Every notification from server will call the NotifyCallback function.
+		return ctrl.Result{}, nil
 	}
 
 	log.Info("Nothing to do. Waiting for notifications from server")
@@ -123,14 +127,14 @@ func (r *FooReconciler) NotifyCallback(ctx context.Context, req ctrl.Request, re
 		// updates and remove the requestID from the global statusMap.
 		// Update any relevant information provided by the server in the status.
 		log.V(1).Info("The request to create snapshot is complete, unsubscribing updates...")
-		foo.Status.Ready = true
-		// foo.Status.RptIDs = r.JunoManagerClient.StatusMap[reqID].RptIDs
+		r.Unsubscribe(ctx, requestID)
+
+		foo.Status.OperationStatus = OperationStatus_COMPLETED
+		// foo.Status.RptIDs = r.JunoManagerClient.StatusMap[requestID].RptIDs
 		if err := r.Status().Update(ctx, &foo); err != nil {
 			log.Error(err, "unable to update foo's ready status", "requestID", requestID)
 			return
 		}
-
-		r.Unsubscribe(ctx, requestID)
 
 		log.Info("foo custom resource reconciled")
 		return

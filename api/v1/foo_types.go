@@ -36,10 +36,8 @@ type FooSpec struct {
 type FooStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
-	Happy     bool     `json:"happy,omitempty"`
-	RequestID string   `json:"request_id,omitempty"`
-	Ready     bool     `json:"ready"`
-	RptIDs    []string `json:"rpt_ids,omitempty"`
+	OperationStatus string   `json:"operation_status,omitempty"`
+	RptIDs          []string `json:"rpt_ids,omitempty"`
 }
 
 //+kubebuilder:object:root=true
